@@ -7,13 +7,51 @@ import datetime
 import json
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from . import SPEC_VERSION, __version__, behaviour, identifiers, surface
-from .report import LEVELS, Report, render
-from .transport import ProbeError, check_transport
+from . import SPEC_VERSION, __version__, behaviour, identifiers, repo, surface
+from .report import LEVELS, NEEDS_REPO, RULES, Report, render
+from .transport import ProbeError, _parse_body, check_transport
+
+CLAIM_KEY = "org.genefoundry/gts"
+
+
+def check_claim(rep: Report, claim: Any, levels: list[str], where: str) -> None:
+    """GTS-CORE-VER-04: the declared claim has its fields, and this run does not contradict it."""
+    rep.rule = "GTS-CORE-VER-04"
+    if claim is None:
+        rep.reasons[rep.rule] = (
+            "the server declares no conformance claim (the rule binds a server that claims one)"
+        )
+        return
+    claim = claim if isinstance(claim, dict) else {}
+    level = claim.get("level")
+    claimed = list(LEVELS)[: list(LEVELS).index(level) + 1] if level in LEVELS else []
+    total = sum(r.split("-")[1] in [LEVELS[x] for x in claimed] for r in RULES)
+    bad = [
+        key
+        for key, ok in (
+            ("spec", isinstance(claim.get("spec"), str) and claim["spec"]),
+            ("level", bool(claimed)),
+            ("kit", isinstance(claim.get("kit"), str) and claim["kit"]),
+            (
+                "rules_checked",
+                type(claim.get("rules_checked")) is int and 0 <= claim["rules_checked"] <= total,
+            ),
+            ("report", isinstance(claim.get("report", ""), str)),
+        )
+        if not ok
+    ]
+    rep.check(f"{where} declares spec, level, kit, rules_checked", not bad, f"bad {bad}")
+    if claimed and set(claimed) <= set(levels):
+        # The failure itself is already reported under its rule; this only flags the claim.
+        if rep.failed(claimed):
+            rep.warn(f"the claimed level {level!r}", "this run finds a FAIL or UNGATED rule there")
+        else:
+            rep.check(f"the claimed level {level!r} has no failure in this run", True)
 
 
 def run(
@@ -29,6 +67,7 @@ def run(
     delay: float = 0.0,
     timeout: float = 60.0,
     transport: httpx.BaseTransport | None = None,
+    repo_path: str | None = None,
 ) -> dict[str, Any]:
     """Check one server and return the report as a JSON-serialisable dict."""
     levels = list(LEVELS)[: list(LEVELS).index(level) + 1]
@@ -40,7 +79,7 @@ def run(
             rep, client, base, token=token, expected_name=name, health="operational" in levels
         )
         probe = behaviour.Probe(base, client, headers, delay)
-        probe.initialize()
+        init = probe.initialize()
         tools = probe.list_tools()
         if not tools:
             raise ProbeError("tools/list returned no tool")
@@ -48,6 +87,16 @@ def run(
         ns = namespace or re.sub(r"-(link|mcp|server)$", "", str(info.get("name"))).replace("-", "")
         surface.check_surface(rep, tools, recommended=recommended, server=str(info.get("name")))
         surface.check_naming(rep, tools, ns, recommended=recommended)
+        root = Path(repo_path) if repo_path else None
+        readme = root / "README.md" if root else None
+        surface.check_read_only(
+            rep, tools, readme.read_text(encoding="utf-8") if readme and readme.is_file() else None
+        )
+        surface.check_output_schemas(rep, tools)
+        if root:
+            repo.check_changelog(rep, root)
+        else:
+            rep.reasons["GTS-CORE-VER-03"] = NEEDS_REPO
         if recommended and entrypoints:
             surface.check_pins(rep, tools, entrypoints, ns)
         elif recommended:
@@ -56,6 +105,11 @@ def run(
         behaviour.run(rep, probe, tools, recommended=recommended, calls=calls)
         if recommended:
             identifiers.run(rep, probe, tools, ns, frozenset(free_text or []))
+        claim = (init.get("_meta") or {}).get(CLAIM_KEY)
+        where = "initialize _meta"
+        if claim is None:
+            claim, where = _parse_body(client.get(f"{base}/health")).get("gts"), "/health gts"
+        check_claim(rep, claim, levels, where)
     return {
         "kit_version": __version__,
         "spec_version": SPEC_VERSION,
@@ -63,6 +117,7 @@ def run(
         "url": base,
         "server": {"name": info.get("name"), "version": info.get("version")},
         "namespace": ns,
+        "repo": bool(repo_path),
         "tools": len(tools),
         "conformant_so_far": not rep.failed(levels),
         "levels": rep.to_dict(levels),
@@ -108,6 +163,12 @@ def main(argv: list[str] | None = None) -> int:
         "--delay", type=float, default=0.0, help="seconds to wait before each tool request"
     )
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--repo",
+        metavar="PATH",
+        help="the server's repository, for the rules checked statically (GTS-CORE-VER-03; "
+        "the README for GTS-CORE-RO-01)",
+    )
     parser.add_argument("--json", action="store_true", help="print the full report as JSON")
     args = parser.parse_args(argv)
     try:
@@ -124,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
             },
             delay=args.delay,
             timeout=args.timeout,
+            repo_path=args.repo,
         )
     except (ProbeError, httpx.HTTPError, behaviour.ProtocolError) as exc:
         print(f"PROBE ERROR: {exc}", file=sys.stderr)

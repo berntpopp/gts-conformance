@@ -17,6 +17,7 @@ from .report import Report
 
 SUPPORTED_PROTOCOL = "2025-06-18"
 UNSUPPORTED_PROTOCOL = "1999-01-01"
+FOREIGN_ORIGIN = "https://gts-check.invalid"  # a reserved name: never a server's own origin
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")
 HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
@@ -133,6 +134,14 @@ def check_transport(
     )
     rep.check(
         "unsupported MCP-Protocol-Version → 400", bad.status_code == 400, f"got {bad.status_code}"
+    )
+
+    foreign = client.post(f"{base}/mcp", json=_INIT, headers={**headers, "Origin": FOREIGN_ORIGIN})
+    rep.check(
+        f"initialize with Origin {FOREIGN_ORIGIN} is rejected (4xx)",
+        400 <= foreign.status_code < 500,
+        f"got {foreign.status_code}",
+        rule="GTS-CORE-TRN-04",
     )
 
     rep.check(

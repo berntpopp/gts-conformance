@@ -4,9 +4,11 @@
 checks a Model Context Protocol (MCP) server against the specification's rules (IDs
 `GTS-*`). The specification text will be published separately.
 
-**Status:** kit 0.2.3 checks 33 of the 65 rules against a live server (Core 19 of 29,
-Recommended 13 of 18, Operational 1 of 18). The other 32 are printed as `NOT-CHECKED` with
-the reason. The package is `gts_conformance`; it needs `httpx` and
+**Status:** kit 0.3.0 checks 42 of the 65 rules (Core 28 of 29, Recommended 13 of 18,
+Operational 1 of 18): 41 against the live server, GTS-CORE-VER-03 from the server's repository
+(`--repo`). GTS-CORE-TXT-03 cannot be observed and is printed as `MANUAL`, for the maintainer
+to attest. The other 22 are printed as `NOT-CHECKED` with the reason. Every rule line shows its
+mode: `runtime`, `repo`, `manual` or `none` (no check yet). The package is `gts_conformance`; it needs `httpx` and
 `jsonschema`, carries the envelope schema of
 [genefoundry-envelope](https://github.com/berntpopp/genefoundry-envelope) v1.2.0 (its
 sha256 is verified on import), and does not depend on the `genefoundry-router` package, from which its probes are adapted
@@ -15,7 +17,7 @@ sha256 is verified on import), and does not depend on the `genefoundry-router` p
 ## Use
 
 ```bash
-pip install git+https://github.com/berntpopp/gts-conformance@v0.2.3
+pip install git+https://github.com/berntpopp/gts-conformance@v0.3.0
 gts-check https://my-server.example.org --level core
 ```
 
@@ -37,6 +39,7 @@ uv run pytest                                       # the kit's own tests
 | `--entrypoints a,b` | The nominated entry-point tools. Without it GTS-REC-PIN-01 and -02 are not checked. |
 | `--free-text tool.param,…` | Search boxes that take free text, not one gene. They are left out of GTS-REC-BEH-05 and listed as `SKIP`. |
 | `--call TOOL=JSON` | The arguments of one tool's control call, in place of its examples. Repeatable. The tool's result is validated even if it is an ops/meta tool; a tool that declares `readOnlyHint: false` is then called exactly once. |
+| `--repo PATH` | The server's repository, read statically: `CHANGELOG.md` for GTS-CORE-VER-03, `README.md` for the writing tools of GTS-CORE-RO-01. Without it GTS-CORE-VER-03 is `NOT-CHECKED`. |
 | `--token TOKEN` | Static service token, sent as a Bearer token. |
 | `--delay SECONDS` | Wait before each tool request. Use it against a production server. |
 | `--json` | The full report: every finding of every rule, with counts per level. |
@@ -60,11 +63,12 @@ probe error.
 
 ```text
 CORE
-  GTS-CORE-TRN-01  PASS
-  GTS-CORE-TRN-04  NOT-CHECKED  check to be written
-  GTS-CORE-ERR-01  FAIL         get_record: an error envelope carries MCP isError:true — …
+  GTS-CORE-TRN-01  runtime  PASS
+  GTS-CORE-ERR-01  runtime  FAIL         get_record: an error envelope carries MCP isError:true — …
+  GTS-CORE-TXT-03  manual   MANUAL       the kit cannot make an upstream return oversized text; …
+  GTS-CORE-VER-03  repo     NOT-CHECKED  pass --repo with the server's repository
   …
-Core: NOT CONFORMANT (1 failed, 0 ungated; 18 pass, 0 warn, 0 inconclusive, 10 not checked, of 29 rules)
+Core: NOT CONFORMANT (1 failed, 0 ungated; 25 pass, 0 warn, 0 inconclusive, 2 not checked, 1 manual, of 29 rules)
 ```
 
 | Status | Meaning |
@@ -72,12 +76,14 @@ Core: NOT CONFORMANT (1 failed, 0 ungated; 18 pass, 0 warn, 0 inconclusive, 10 n
 | `PASS` | Every finding of the rule passed. |
 | `FAIL` | At least one finding failed. Fails the level. |
 | `UNGATED` | A tool could not be verified at all (a required parameter without `examples`). Fails the level. |
-| `WARN` | A failed SHOULD or a heuristic hit (GTS-CORE-TXT-01, GTS-REC-BEH-04, GTS-REC-ENV-01, GTS-REC-SRCH-01, -03). Does not fail the level. |
+| `WARN` | A failed SHOULD or a heuristic hit (GTS-CORE-ENV-04, GTS-CORE-TXT-01, GTS-CORE-VER-03 `Removed`/`Added`, a claim of GTS-CORE-VER-04 that this run contradicts, GTS-REC-BEH-04, GTS-REC-ENV-01, GTS-REC-SRCH-01, -03). Does not fail the level. |
 | `SKIP` | Inconclusive: the upstream was unreachable, or no call returned rows to test against. |
 | `EXEMPT` | The specification puts the tool outside the rule: the OpenAI deep-research compatibility tools named exactly `search` and `fetch`, for GTS-CORE-ENV-02, -03 and GTS-CORE-TXT-01; and `pubtator-link`'s tool surface for GTS-REC-BUD-02 up to its 13,000-token hard cap. Listed under the rule, counted neither as a pass nor as a failure. |
 | `NOT-CHECKED` | The kit has no check for the rule, lacks an option it needs, or the server has nothing that exercises it. |
+| `MANUAL` | The rule cannot be observed by the kit; the server's maintainer attests it. Never a pass. A level whose only open rules are manual is reported "CONFORMANT if the manual rule is attested". |
 
-The report ends with the coverage list (`coverage` in `--json`): for every tool, whether its
+In `--json` every rule carries `mode`, `counts` carries `MANUAL`, and the report carries
+`repo` (whether `--repo` was given). The report ends with the coverage list (`coverage` in `--json`): for every tool, whether its
 result was validated against the envelope schema, and the reason if it was not.
 
 Report semantics:
@@ -90,11 +96,39 @@ Report semantics:
 - **Format, not meaning.** As with the Beacon verifier, the kit checks the frame and the
   behaviour, not whether a variant classification is right.
 
-## Limits of version 0.1
+## Limits
 
-- No static mode. Rules that read the repository, the Compose file, the image or the
-  server's outbound HTTP code are not checked (all Operational rules but GTS-OPS-HLT-01).
-- GTS-CORE-VER-03 needs an earlier snapshot of `tools/list`; the kit keeps none.
+- The static mode (`--repo`) reads the changelog and the README only. Rules that read the
+  Compose file, the image or the server's outbound HTTP code are not checked (all Operational
+  rules but GTS-OPS-HLT-01).
+- GTS-CORE-VER-03 trusts `CHANGELOG.md` (Keep a Changelog headings): a `BREAKING` heading in a
+  step that does not raise MAJOR fails; `### Removed` outside a MAJOR step and `### Added` in a
+  PATCH step warn, as those headings also cover changes outside the tool surface. Steps from a
+  0.x version are skipped. The kit does not diff the tool surfaces of two releases.
+- GTS-CORE-TRN-04 sends `initialize` with `Origin: https://gts-check.invalid` and expects a 4xx.
+- GTS-CORE-SCH-04 checks that a published `outputSchema` names `success`, `result(s)` and
+  `_meta`, and validates the control result against it. A tool without one passes (it MAY omit it).
+- GTS-CORE-ENV-04 is a heuristic and warns: a record (of `results`, or the `result`) needs a
+  value that looks like an identifier (a CURIE, an accession, an rsID, or a key `id`, `*_id`,
+  `accession`, `pmid`) and another string beside it as the label. It cannot tell which
+  identifier is the source's own.
+- GTS-CORE-ENV-05 accepts `unsafe_for_clinical_use: true` at the top level (the example of the
+  specification) or in `_meta`, as the rule text does not say where the flag sits.
+- GTS-CORE-TXT-02 checks that fenced `text` is NFC; the forbidden code points and the
+  `raw_sha256` format are checked by the envelope schema. That NFKC was not applied and no prose
+  was deleted cannot be observed. A server whose results carry no `untrusted_text` object is
+  `NOT-CHECKED`.
+- GTS-CORE-TXT-03 is `MANUAL`: the kit cannot make an upstream send oversized text. A result it
+  sees over the default bounds without a `truncated: true` fails the rule.
+- GTS-CORE-TXT-04 sends instruction-like prose, with a bell and a bidirectional override, in
+  one free string parameter of every tool and fails if `message`, `field`, `allowed_values`,
+  `candidates`, `hint`, `recovery_action` or `_meta.next_commands` carries it back. An echoed
+  upstream error body cannot be provoked.
+- GTS-CORE-VER-04 reads `_meta."org.genefoundry/gts"` of `initialize`, else `gts` of
+  `/health`. A server that declares nothing is `NOT-CHECKED`: the rule binds a server that
+  claims conformance, and whether it claims one elsewhere is not observable.
+- GTS-CORE-RO-01 checks the declared `readOnlyHint`, not whether a tool really leaves state
+  alone; with `--repo`, a tool that declares `false` must be named in the README.
 - GTS-CORE-TRN-05: when the server wants a token, the kit cannot tell a service token
   from a user's and reports `SKIP`.
 - GTS-CORE-TXT-01 is a scan for strings over 500 characters that contain a space, outside
@@ -138,7 +172,8 @@ useful to a server author and stays outside the rule set.
 
 "Exists" means the check runs today in the router or the fleet; "partial" means it
 exists but needs the change stated; "TBW" means to be written. "Kit" says whether
-`gts-check` 0.2.3 checks the rule against a live server.
+`gts-check` 0.3.0 checks the rule: `yes` against a live server, `repo` from the repository
+(`--repo`), `manual` printed for the maintainer to attest.
 
 ### Core
 
@@ -147,7 +182,7 @@ exists but needs the change stated; "TBW" means to be written. "Kit" says whethe
 | GTS-CORE-TRN-01 | `transport`: `POST /mcp` returns 200, no 307; `GET /mcp` no 307 | exists | yes |
 | GTS-CORE-TRN-02 | `transport`: JSON content type, no `Mcp-Session-Id` (tier `stateless`) | exists | yes |
 | GTS-CORE-TRN-03 | `transport`: unsupported `MCP-Protocol-Version` returns 400 | exists | yes |
-| GTS-CORE-TRN-04 | request with a foreign `Origin` is rejected | TBW (listed in the Transport standard, absent from the probe) | no |
+| GTS-CORE-TRN-04 | `transport`: `initialize` with a foreign `Origin` is rejected (4xx) | exists | yes |
 | GTS-CORE-TRN-05 | `transport` accepts a service token; assert that `initialize` works without a user token | partial | yes |
 | GTS-CORE-NAM-01 | `naming`: `check_leaf_name` charset and length | exists (move to live `tools/list`) | yes |
 | GTS-CORE-NAM-02 | `naming`: no self-prefix | exists | yes |
@@ -155,24 +190,24 @@ exists but needs the change stated; "TBW" means to be written. "Kit" says whethe
 | GTS-CORE-SCH-01 | `surface` S1 | exists | yes |
 | GTS-CORE-SCH-02 | `surface` S2, S3 | exists | yes |
 | GTS-CORE-SCH-03 | `behaviour`: `check_declared_enums` | exists | yes |
-| GTS-CORE-SCH-04 | validate `structuredContent` against a published `outputSchema` | TBW | no |
+| GTS-CORE-SCH-04 | a published `outputSchema` names the envelope; the control result validates against it | exists | yes |
 | GTS-CORE-ENV-01 | `behaviour`: `envelope()` reads it; assert object and text mirror | partial | yes |
 | GTS-CORE-ENV-02 | `behaviour`: `check_envelope_schema`, envelope schema v1.2 on every successful data result (`success`, top-level `results` or `result`) | exists | yes |
 | GTS-CORE-ENV-03 | `behaviour`: `check_envelope_schema`, envelope schema v1.2 on every successful data result (`_meta.source`, `data_version`, `retrieved_at`, `request_id`, `elapsed_ms`); error results are not checked | exists | yes |
-| GTS-CORE-ENV-04 | each record carries an identifier matching a known pattern list | TBW | no |
-| GTS-CORE-ENV-05 | assert `unsafe_for_clinical_use` | TBW | no |
+| GTS-CORE-ENV-04 | each record carries an identifier and a label (heuristic, warns) | exists | yes |
+| GTS-CORE-ENV-05 | `unsafe_for_clinical_use: true` at the top level or in `_meta` | exists | yes |
 | GTS-CORE-ERR-01 | `behaviour`: `_record_error_frame` (`isError`, frame keys) | exists | yes |
 | GTS-CORE-ERR-02 | `behaviour`: `ERROR_CODES` | exists | yes |
 | GTS-CORE-ERR-03 | `behaviour`: `check_argument_error` | exists | yes |
 | GTS-CORE-TXT-01 | `fencing` inventory and per-server hostile test; live scan for long unfenced strings | partial | yes |
-| GTS-CORE-TXT-02 | scan fenced `text` for the forbidden code points; verify `raw_sha256` format | TBW | no |
-| GTS-CORE-TXT-03 | count and size of fenced objects in results against the limits | TBW | no |
-| GTS-CORE-TXT-04 | send inputs with control characters and instruction-like prose; assert they do not return | TBW (done per server by hand so far) | no |
+| GTS-CORE-TXT-02 | fenced `text` is NFC; code points and `raw_sha256` by the envelope schema | exists | yes |
+| GTS-CORE-TXT-03 | not observable; an observed silent breach of the bounds fails | manual | manual |
+| GTS-CORE-TXT-04 | hostile-input probe on one free string parameter per tool | exists | yes |
 | GTS-CORE-VER-01 | `transport`: `serverInfo.name` equals `--name`; add the pattern | exists | yes |
 | GTS-CORE-VER-02 | per-server `test_version_single_source.py`; live: version is SemVer and equals `/health` | partial | yes |
-| GTS-CORE-VER-03 | `drift`: diff of `tools/list` against the pinned snapshot, compared with the version step | partial | no |
-| GTS-CORE-VER-04 | read the declaration from `initialize` `_meta` (or `/health`) and compare it with the run | TBW | no |
-| GTS-CORE-RO-01 | assert `annotations.readOnlyHint` on every tool | TBW | no |
+| GTS-CORE-VER-03 | `CHANGELOG.md` release steps against the version rule (`--repo`) | exists | repo |
+| GTS-CORE-VER-04 | read the claim from `initialize` `_meta` (or `/health`), check its fields, compare with the run | exists | yes |
+| GTS-CORE-RO-01 | every tool declares `annotations.readOnlyHint`; with `--repo` a writing tool is in the README | exists | yes |
 
 ### Recommended
 
@@ -222,13 +257,12 @@ exists but needs the change stated; "TBW" means to be written. "Kit" says whethe
 
 ### Count
 
-| Level | Rules | Exists | Partial | TBW | In kit 0.2.3 |
-|---|---|---|---|---|---|
-| Core | 29 | 15 | 5 | 9 | 19 |
-| Recommended | 18 | 10 | 3 | 5 | 13 |
-| Operational | 18 | 8 | 4 | 6 | 1 |
-| Total | 65 | 33 | 12 | 20 | 33 |
+| Level | Rules | Exists | Partial | Manual | TBW | In kit 0.3.0 |
+|---|---|---|---|---|---|---|
+| Core | 29 | 24 | 4 | 1 | 0 | 28 checked (27 runtime, 1 repo), 1 manual |
+| Recommended | 18 | 10 | 3 | 0 | 5 | 13 |
+| Operational | 18 | 8 | 4 | 0 | 6 | 1 |
+| Total | 65 | 42 | 11 | 1 | 11 | 42 checked, 1 manual |
 
-Not in the kit although a check exists or partly exists: GTS-CORE-VER-03 (needs a pinned
-snapshot) and eleven Operational rules that need the repository or the deployment
+Not in the kit although a check exists or partly exists: eleven Operational rules that need the repository or the deployment
 (GTS-OPS-HTTP-01 to -04, GTS-OPS-DEP-01 to -03, GTS-OPS-CTR-06, GTS-OPS-META-01 to -03).

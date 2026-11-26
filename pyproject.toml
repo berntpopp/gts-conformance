@@ -1,6 +1,6 @@
 [project]
 name = "gts-conformance"
-version = "0.2.3"
+version = "0.3.0"
 description = "Conformance kit for the Genetics Tool Server Specification (GTS) v1"
 readme = "README.md"
 license = "MIT"

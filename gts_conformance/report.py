@@ -9,6 +9,7 @@ LEVELS = {"core": "CORE", "recommended": "REC", "operational": "OPS"}  # ordered
 # Worst first; the worst finding wins. A rule is EXEMPT only when every finding is.
 SEVERITY = ("FAIL", "UNGATED", "WARN", "PASS", "SKIP", "EXEMPT")
 NOT_CHECKED = "NOT-CHECKED"
+MANUAL = "MANUAL"  # not observable by the kit: the maintainer attests it; never a pass
 
 TBW = "check to be written"
 STATIC = "needs the server's repository or deployment, not a live endpoint"
@@ -18,7 +19,7 @@ RULES: dict[str, str] = {
     "GTS-CORE-TRN-01": "",
     "GTS-CORE-TRN-02": "",
     "GTS-CORE-TRN-03": "",
-    "GTS-CORE-TRN-04": TBW,
+    "GTS-CORE-TRN-04": "",
     "GTS-CORE-TRN-05": "",
     "GTS-CORE-NAM-01": "",
     "GTS-CORE-NAM-02": "",
@@ -26,24 +27,25 @@ RULES: dict[str, str] = {
     "GTS-CORE-SCH-01": "",
     "GTS-CORE-SCH-02": "",
     "GTS-CORE-SCH-03": "",
-    "GTS-CORE-SCH-04": TBW,
+    "GTS-CORE-SCH-04": "",
     "GTS-CORE-ENV-01": "",
     "GTS-CORE-ENV-02": "",
     "GTS-CORE-ENV-03": "",
-    "GTS-CORE-ENV-04": TBW,
-    "GTS-CORE-ENV-05": TBW,
+    "GTS-CORE-ENV-04": "",
+    "GTS-CORE-ENV-05": "",
     "GTS-CORE-ERR-01": "",
     "GTS-CORE-ERR-02": "",
     "GTS-CORE-ERR-03": "",
     "GTS-CORE-TXT-01": "",
-    "GTS-CORE-TXT-02": TBW,
-    "GTS-CORE-TXT-03": TBW,
-    "GTS-CORE-TXT-04": TBW,
+    "GTS-CORE-TXT-02": "",
+    "GTS-CORE-TXT-03": "the kit cannot make an upstream return oversized text; attest the bound "
+    "and its typed flag (an observed silent breach is still reported as FAIL)",
+    "GTS-CORE-TXT-04": "",
     "GTS-CORE-VER-01": "",
     "GTS-CORE-VER-02": "",
-    "GTS-CORE-VER-03": "needs a pinned earlier snapshot of tools/list",
-    "GTS-CORE-VER-04": TBW,
-    "GTS-CORE-RO-01": TBW,
+    "GTS-CORE-VER-03": "",
+    "GTS-CORE-VER-04": "",
+    "GTS-CORE-RO-01": "",
     "GTS-REC-BEH-01": "",
     "GTS-REC-BEH-02": "",
     "GTS-REC-BEH-03": "",
@@ -82,6 +84,14 @@ RULES: dict[str, str] = {
     "GTS-OPS-META-03": STATIC,
 }
 NOTHING_TO_PROBE = "nothing on this server exercises the check"
+# How the kit checks a rule: "runtime" over MCP (the default for an implemented rule), "repo"
+# from the server's repository (--repo), "manual" for the maintainer to attest, "none" not yet.
+MODES = {"GTS-CORE-VER-03": "repo", "GTS-CORE-TXT-03": "manual"}
+NEEDS_REPO = "pass --repo with the server's repository"
+
+
+def mode(rule: str) -> str:
+    return MODES.get(rule) or ("none" if RULES[rule] else "runtime")
 
 
 @dataclass
@@ -117,7 +127,8 @@ class Report:
 
     def status(self, rule: str) -> str:
         seen = {status for status, _ in self.findings.get(rule, [])}
-        return next((s for s in SEVERITY if s in seen), NOT_CHECKED)
+        unseen = MANUAL if mode(rule) == "manual" else NOT_CHECKED
+        return next((s for s in SEVERITY if s in seen), unseen)
 
     def failed(self, levels: list[str]) -> bool:
         return any(
@@ -132,14 +143,16 @@ class Report:
             rules = []
             for rule in (r for r in RULES if r.split("-")[1] == LEVELS[level]):
                 status = self.status(rule)
-                entry: dict[str, Any] = {"id": rule, "status": status}
-                if status == NOT_CHECKED:
+                entry: dict[str, Any] = {"id": rule, "status": status, "mode": mode(rule)}
+                if status in (NOT_CHECKED, MANUAL):
                     entry["reason"] = self.reasons.get(rule) or RULES[rule] or NOTHING_TO_PROBE
                 entry["findings"] = [
                     {"status": s, "detail": text} for s, text in self.findings.get(rule, [])
                 ]
                 rules.append(entry)
-            counts = {s: sum(r["status"] == s for r in rules) for s in (*SEVERITY, NOT_CHECKED)}
+            counts = {
+                s: sum(r["status"] == s for r in rules) for s in (*SEVERITY, NOT_CHECKED, MANUAL)
+            }
             out[level] = {"rules": rules, "counts": counts}
         return out
 
@@ -152,19 +165,20 @@ def render(report: dict[str, Any], shown: int = 3) -> str:
         lines.append(level.upper())
         for rule in block["rules"]:
             status = rule["status"]
-            if status == NOT_CHECKED:
-                lines.append(f"  {rule['id']:<17}{status:<13}{rule['reason']}")
+            head = f"  {rule['id']:<17}{rule.get('mode', ''):<9}{status:<13}"
+            if status in (NOT_CHECKED, MANUAL):
+                lines.append(head + rule["reason"])
                 continue
             details = [f["detail"] for f in rule["findings"] if f["status"] == status]
             first = "" if status == "PASS" else details[0]
-            lines.append(f"  {rule['id']:<17}{status:<13}{first}".rstrip())
+            lines.append(f"{head}{first}".rstrip())
             if status != "PASS":
-                lines += [f"  {'':<30}{d}" for d in details[1:shown]]
+                lines += [f"  {'':<39}{d}" for d in details[1:shown]]
                 if len(details) > shown:
-                    lines.append(f"  {'':<30}... and {len(details) - shown} more (see --json)")
+                    lines.append(f"  {'':<39}... and {len(details) - shown} more (see --json)")
             if status != "EXEMPT":
                 exempt = [f["detail"] for f in rule["findings"] if f["status"] == "EXEMPT"]
-                lines += [f"  {'':<30}EXEMPT {d}" for d in exempt]
+                lines += [f"  {'':<39}EXEMPT {d}" for d in exempt]
         c = block["counts"]
         bad = c["FAIL"] + c["UNGATED"]
         total = len(block["rules"])
@@ -174,11 +188,18 @@ def render(report: dict[str, Any], shown: int = 3) -> str:
         )
         if c["EXEMPT"]:
             tail = tail.replace(" not checked,", f" not checked, {c['EXEMPT']} exempt,")
+        if c.get(MANUAL):
+            tail = tail.replace(" not checked,", f" not checked, {c[MANUAL]} manual,")
         # A level with unchecked rules is never called conformant: the kit has not seen it pass.
         if bad:
             verdict = f"NOT CONFORMANT ({c['FAIL']} failed, {c['UNGATED']} ungated; {tail})"
         elif c[NOT_CHECKED] or c["SKIP"]:
             verdict = f"no failure found, conformance NOT established ({tail})"
+        elif c.get(MANUAL):
+            n = c[MANUAL]
+            verdict = (
+                f"CONFORMANT if the {n} manual rule{'s are' if n != 1 else ' is'} attested ({tail})"
+            )
         else:
             verdict = f"CONFORMANT ({tail})"
         verdicts.append(f"{level.capitalize()}: {verdict}")

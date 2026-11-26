@@ -96,6 +96,15 @@ class FakeServer(httpx.MockTransport):
             batch["name"] = "fake_resolve_genes_batch"
         if self.has("odd_verb"):
             batch["name"] = "fetch_genes_batch"
+        resolve["outputSchema"] = {
+            "type": "object",
+            "required": ["success", "result", "_meta"],
+            "properties": {"success": {"type": "boolean"}, "result": {}, "_meta": {}},
+        }
+        if self.has("bad_output_schema"):  # describes the envelope; the result lacks a field
+            resolve["outputSchema"]["required"].append("results")
+        if self.has("foreign_output_schema"):
+            resolve["outputSchema"] = {"type": "object", "properties": {"symbol": {}}}
         tools = [search, resolve, batch]
         if self.has("compat_tools"):  # OpenAI deep-research compatibility tools
             for name, param, example in (("search", "query", "KRAS"), ("fetch", "id", "HGNC:6407")):
@@ -123,6 +132,9 @@ class FakeServer(httpx.MockTransport):
                     },
                 }
             )
+        for tool in tools:
+            if not self.has("no_read_only_hint"):
+                tool.setdefault("annotations", {"readOnlyHint": True})
         return tools
 
     # ------------------------------------------------------------------ tool calls
@@ -140,6 +152,8 @@ class FakeServer(httpx.MockTransport):
         return self.result(env, is_error=not self.has("no_is_error"))
 
     def result(self, env: dict[str, Any], is_error: bool = False) -> dict[str, Any]:
+        if env.get("success") and not self.has("no_clinical_flag"):
+            env = {**env, "unsafe_for_clinical_use": True}
         text = "not json" if self.has("no_mirror") else json.dumps(env)
         return {
             "content": [{"type": "text", "text": text}],
@@ -212,6 +226,8 @@ class FakeServer(httpx.MockTransport):
                 "not_found", _meta={**meta, "next_commands": [{"tool": "search_genes"}]}
             )
         if not known:
+            if self.has("echo_input"):
+                return self.error("not_found", message=f"No gene {genes[0]!r}.")
             return self.error("not_found")
         if name == "resolve_genes_batch":
             page = {"total_count": 1, "has_more": False, "next_cursor": None}
@@ -242,6 +258,20 @@ class FakeServer(httpx.MockTransport):
             "has_more": limit < len(ROWS),
             "next_cursor": None,
         }
+        text = "e\u0301 abstract" if self.has("not_nfc") else "An abstract."
+        fence = {
+            "kind": "untrusted_text",
+            "text": text,
+            "provenance": {
+                "source": "fake",
+                "record_id": "PMID:1",
+                "retrieved_at": "2026-11-25T09:30:00Z",
+            },
+            "raw_sha256": "0" * 64,
+        }
+        rows[:1] = [{**r, "abstract": fence} for r in rows[:1]]
+        if self.has("no_identifier"):
+            rows = [{k: v for k, v in r.items() if k != "hgnc_id"} for r in rows]
         if self.has("bad_fence"):
             rows[0]["summary"] = {"kind": "untrusted_text", "text": "no provenance"}
         if self.has("long_text"):
@@ -262,7 +292,11 @@ class FakeServer(httpx.MockTransport):
                 body["version"] = "9.9.9"
             if self.has("health_no_transport"):
                 del body["transport"]
+            if self.has("health_claim"):
+                body["gts"] = {"spec": "1", "level": "core", "kit": "0.3.0", "rules_checked": 1}
             return httpx.Response(200, json=body)
+        if request.headers.get("origin") and not self.has("any_origin"):
+            return httpx.Response(403)
         if request.method == "GET":
             return httpx.Response(307 if self.has("get_redirect") else 405)
         if request.headers.get("mcp-protocol-version") == "1999-01-01" and not self.has(
@@ -279,6 +313,11 @@ class FakeServer(httpx.MockTransport):
                 "protocolVersion": "2025-06-18",
                 "serverInfo": {"name": name, "version": version},
             }
+            claim = {"spec": "1.0.0-draft.2", "level": "core", "kit": "0.3.0", "rules_checked": 28}
+            if self.has("bad_claim"):
+                claim["level"] = "gold"
+            if not self.has("no_claim") and not self.has("health_claim"):
+                result["_meta"] = {"org.genefoundry/gts": claim}
         elif method == "tools/list":
             result = {"tools": self.tools()}
         else:

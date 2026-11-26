@@ -268,6 +268,37 @@ def check_naming(
         _file(rep, "GTS-REC-SRCH-03", "tool names are verb_noun with a listed verb", odd, warn=True)
 
 
+def check_read_only(rep: Report, tools: list[dict[str, Any]], readme: str | None) -> None:
+    """GTS-CORE-RO-01: every tool declares readOnlyHint; a writing tool is in the README.
+
+    Whether a tool really leaves state alone is not observable; the kit checks the declaration.
+    """
+    bad = []
+    for tool in tools:
+        hint = (tool.get("annotations") or {}).get("readOnlyHint")
+        if hint is False and readme is not None and tool["name"] not in readme:
+            bad.append(
+                f"{tool['name']} declares readOnlyHint: false but the README does not list it"
+            )
+        elif not isinstance(hint, bool):
+            bad.append(f"{tool['name']} declares no annotations.readOnlyHint")
+    _file(rep, "GTS-CORE-RO-01", "every tool declares annotations.readOnlyHint", bad)
+
+
+def check_output_schemas(rep: Report, tools: list[dict[str, Any]]) -> None:
+    """GTS-CORE-SCH-04, the declared half: a published outputSchema describes the envelope.
+
+    The results are validated against it in `behaviour`. Omitting the schema is allowed.
+    """
+    bad = []
+    for tool in tools:
+        schema = tool.get("outputSchema")
+        text = json.dumps(schema)
+        if schema and not all(key in text for key in ('"success"', '"_meta"', '"result')):
+            bad.append(f"{tool['name']}: outputSchema names no success, result(s) and _meta")
+    _file(rep, "GTS-CORE-SCH-04", "a published outputSchema describes the envelope", bad)
+
+
 def _stem(name: str) -> tuple[str, ...]:
     words = [w for w in name.split("_") if w not in ("batch", "bulk")]
     return tuple(w.removesuffix("s") for w in words)
