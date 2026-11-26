@@ -11,12 +11,17 @@ from pathlib import Path
 import pytest
 from fake_server import FakeServer
 
-from gts_conformance import behaviour, cli, identifiers
-from gts_conformance.report import NOT_CHECKED, RULES, Report, render
+from gts_conformance import behaviour, cli, identifiers, repo
+from gts_conformance.report import MANUAL, NOT_CHECKED, RULES, Report, mode, render
 
 ROOT = Path(__file__).resolve().parents[1]
 IMPLEMENTED = {rule for rule, reason in RULES.items() if not reason}
-ARGS = {"namespace": "fake", "entrypoints": ["search_genes", "resolve_gene"]}
+FIXTURE_REPO = str(Path(__file__).parent / "fixture_repo")
+ARGS = {
+    "namespace": "fake",
+    "entrypoints": ["search_genes", "resolve_gene"],
+    "repo_path": FIXTURE_REPO,
+}
 
 
 def statuses(*defects: str, **kwargs: object) -> dict[str, str]:
@@ -38,13 +43,33 @@ def test_rule_list_is_the_specification() -> None:
 def test_conforming_server_passes_every_implemented_rule() -> None:
     got = statuses()
     assert {rule for rule, status in got.items() if status == "PASS"} == IMPLEMENTED
-    assert {status for rule, status in got.items() if rule not in IMPLEMENTED} == {NOT_CHECKED}
+    assert {status for rule, status in got.items() if rule not in IMPLEMENTED} == {
+        NOT_CHECKED,
+        MANUAL,
+    }
+    # Every Core rule is checked at runtime or from the repository, or is reported as manual.
+    core = [rule for rule in RULES if rule.startswith("GTS-CORE-")]
+    assert {mode(rule) for rule in core} == {"runtime", "repo", "manual"}
+    assert [rule for rule in core if got[rule] != "PASS"] == ["GTS-CORE-TXT-03"]
 
 
 @pytest.mark.parametrize(
     ("defect", "rule", "status"),
     [
         ("get_redirect", "GTS-CORE-TRN-01", "FAIL"),
+        ("any_origin", "GTS-CORE-TRN-04", "FAIL"),
+        ("bad_output_schema", "GTS-CORE-SCH-04", "FAIL"),
+        ("foreign_output_schema", "GTS-CORE-SCH-04", "FAIL"),
+        ("no_identifier", "GTS-CORE-ENV-04", "WARN"),
+        ("no_clinical_flag", "GTS-CORE-ENV-05", "FAIL"),
+        ("not_nfc", "GTS-CORE-TXT-02", "FAIL"),
+        ("echo_input", "GTS-CORE-TXT-04", "FAIL"),
+        ("bad_claim", "GTS-CORE-VER-04", "FAIL"),
+        ("no_is_error", "GTS-CORE-VER-04", "WARN"),
+        ("no_claim", "GTS-CORE-VER-04", NOT_CHECKED),
+        ("health_claim", "GTS-CORE-VER-04", "PASS"),
+        ("no_read_only_hint", "GTS-CORE-RO-01", "FAIL"),
+        ("write_tool", "GTS-CORE-RO-01", "FAIL"),
         ("session_id", "GTS-CORE-TRN-02", "FAIL"),
         ("any_version", "GTS-CORE-TRN-03", "FAIL"),
         ("bad_tool_name", "GTS-CORE-NAM-01", "FAIL"),
@@ -96,7 +121,7 @@ def test_a_missing_provenance_field_fails_only_its_rule_and_is_named() -> None:
             for r in report["levels"]["core"]["rules"]
             if r["status"] == "FAIL"
         }
-        assert list(failed) == ["GTS-CORE-ENV-03"]
+        assert list(failed) == ["GTS-CORE-ENV-03"]  # the claim of Core only warns (VER-04)
         assert all(field in f["detail"] for f in failed["GTS-CORE-ENV-03"] if f["status"] == "FAIL")
 
 
@@ -130,8 +155,8 @@ def test_the_exemption_is_by_exact_name_and_hides_no_defect() -> None:
     assert not rep.failed(["core"])
     report = rep.to_dict(["core"])
     assert report["core"]["counts"]["EXEMPT"] == 3
-    assert re.search(r"GTS-CORE-ENV-02\s+EXEMPT\s+fetch: results", render(report))
-    assert "26 not checked, 3 exempt, of 29 rules" in render(report)
+    assert re.search(r"GTS-CORE-ENV-02\s+runtime\s+EXEMPT\s+fetch: results", render(report))
+    assert "25 not checked, 1 manual, 3 exempt, of 29 rules" in render(report)
     assert behaviour.COMPAT_TOOLS == ("search", "fetch")  # `search_genes` is a data tool
 
 
@@ -251,9 +276,12 @@ def test_cli_text_json_and_exit_codes(
 
     assert cli.main(["http://fake.test"]) == 1
     text = capsys.readouterr().out
-    assert re.search(r"GTS-CORE-ERR-01\s+FAIL", text)
+    assert re.search(r"GTS-CORE-ERR-01\s+runtime\s+FAIL", text)
+    assert re.search(r"GTS-CORE-VER-03\s+repo\s+NOT-CHECKED\s+pass --repo", text)
+    assert re.search(r"GTS-CORE-TXT-03\s+manual\s+MANUAL\s+the kit cannot", text)
+    assert {r["mode"] for r in report["levels"]["core"]["rules"]} == {"runtime", "repo", "manual"}
     assert "Core: NOT CONFORMANT (1 failed" in text
-    assert re.search(r"GTS-OPS-DEP-01\s+NOT-CHECKED", text)
+    assert re.search(r"GTS-OPS-DEP-01\s+none\s+NOT-CHECKED", text)
 
     assert "Envelope schema: 3 of 3 tools validated" in text
 
@@ -285,3 +313,58 @@ def test_surface_budget_exemption_is_capped_and_only_for_pubtator(
     assert bud02("pubtator-link", 1_000) == "EXEMPT"  # over the limit, under the cap
     assert bud02("pubtator-link", 60) == "FAIL"  # over the hard cap
     assert bud02("other-link", 1_000) == "FAIL"  # no other server is exempt
+
+
+def test_changelog_steps_against_the_version_rule(tmp_path: Path) -> None:
+    def ver03(text: str | None) -> tuple[str, list[str]]:
+        if text is not None:
+            (tmp_path / "CHANGELOG.md").write_text(text)
+        rep = Report()
+        repo.check_changelog(rep, tmp_path)
+        return rep.status("GTS-CORE-VER-03"), [d for _, d in rep.findings["GTS-CORE-VER-03"]]
+
+    assert ver03(None)[0] == "FAIL"  # no changelog
+    breaking = "## [1.1.0]\n\n### Changed (BREAKING)\n\n- x\n\n## [1.0.0]\n"
+    status, details = ver03(breaking)
+    assert status == "FAIL" and "1.0.0 → 1.1.0" in details[0]
+    assert ver03("## [1.0.1]\n\n### Added\n\n- x\n\n## [1.0.0]\n")[0] == "WARN"
+    assert ver03("## [1.1.0]\n\n### Removed\n\n- x\n\n## [1.0.0]\n")[0] == "WARN"
+    assert ver03("## [0.2.0]\n\n### Removed (BREAKING)\n\n## [0.1.0]\n")[0] == "SKIP"
+    assert ver03((ROOT / "tests/fixture_repo/CHANGELOG.md").read_text())[0] == "PASS"
+
+
+def test_a_writing_tool_listed_in_the_readme_passes_the_read_only_rule(tmp_path: Path) -> None:
+    (tmp_path / "CHANGELOG.md").write_text("")
+    (tmp_path / "README.md").write_text("resolve_genes_batch writes a session.")
+    assert statuses("write_tool", repo_path=str(tmp_path))["GTS-CORE-RO-01"] == "PASS"
+    assert statuses("write_tool", repo_path=None)["GTS-CORE-RO-01"] == "PASS"  # README unread
+
+
+def test_a_silent_breach_of_the_text_bounds_fails_and_a_flagged_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(behaviour, "MAX_FENCE_BYTES", 4)
+    assert statuses()["GTS-CORE-TXT-03"] == "FAIL"
+    rep = Report()
+    fence = {"kind": "untrusted_text", "text": "longer than four"}
+    behaviour.check_fences(rep, "t", {"results": [{"a": fence}], "_meta": {"truncated": True}})
+    assert rep.status("GTS-CORE-TXT-03") == "PASS"
+
+
+def test_identifier_heuristic() -> None:
+    def env04(*records: dict[str, object]) -> str:
+        rep = Report()
+        behaviour.check_identifiers(rep, "t", {"results": list(records)})
+        return rep.status("GTS-CORE-ENV-04")
+
+    assert env04({"gene": {"hgnc_id": "HGNC:1100", "symbol": "BRCA1"}}) == "PASS"
+    assert env04({"accession": "VCV000012345", "title": "NM_007294.4(BRCA1):c.68_69del"}) == "PASS"
+    assert env04({"pmid": 12345678, "title": "A paper"}) == "PASS"
+    assert env04({"symbol": "BRCA1", "score": 0.3}) == "WARN"  # no identifier
+    assert env04({"hgnc_id": "HGNC:1100"}) == "WARN"  # no label
+
+
+def test_a_suggested_next_call_that_carries_the_raw_input_is_an_echo() -> None:
+    call = {"tool": "search", "arguments": {"query": behaviour.HOSTILE}}
+    assert behaviour.echoed({"_meta": {"next_commands": [call]}}) == ["_meta.next_commands"]
+    assert behaviour.echoed({"message": "query must be a gene symbol", "field": "query"}) == []
